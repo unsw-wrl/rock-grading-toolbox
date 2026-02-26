@@ -112,6 +112,7 @@
   </div>
 
   <button id="runButton" onclick="runPython()">Run Model</button>
+  <input type="file" id="appPyFile" accept=".py,text/x-python" style="display:none">
 
   <div class="progress-wrap" id="progressWrap">
     <div class="progress-label" id="progressLabel">Starting...</div>
@@ -132,6 +133,7 @@
 
 <script>
 let pyodide;
+let appSourceCache = null;
 const pyodideReadyPromise = initPyodide();
 
 async function initPyodide() {
@@ -141,21 +143,52 @@ async function initPyodide() {
   setProgress(25, "Loading Python packages (first run can take a while)...");
   await pyodide.loadPackage(["numpy", "pandas", "matplotlib"]);
 
-  setProgress(45, "Loading model code (app.py)...");
-  let appSource = "";
+  setProgress(100, "Python ready");
+  hideProgressSoon();
+}
+
+function pickLocalAppPyFile() {
+  return new Promise((resolve, reject) => {
+    const input = document.getElementById("appPyFile");
+    input.value = "";
+    input.onchange = async () => {
+      const f = input.files && input.files[0];
+      if (!f) {
+        reject(new Error("Local mode needs app.py selected once per page load."));
+        return;
+      }
+      try {
+        resolve(await f.text());
+      } catch (e) {
+        reject(new Error("Could not read selected app.py file."));
+      }
+    };
+    input.click();
+  });
+}
+
+async function ensureAppModuleLoaded() {
+  if (appSourceCache) {
+    pyodide.FS.writeFile("app.py", appSourceCache);
+    return;
+  }
+
   try {
     const resp = await fetch("./app.py", { cache: "no-store" });
     if (!resp.ok) {
       throw new Error(`HTTP ${resp.status}`);
     }
-    appSource = await resp.text();
+    appSourceCache = await resp.text();
   } catch (e) {
-    throw new Error("Could not load app.py. This works on GitHub Pages or any local HTTP server (not file://).");
+    if (window.location.protocol === "file:") {
+      setProgress(45, "Select local app.py...");
+      appSourceCache = await pickLocalAppPyFile();
+    } else {
+      throw new Error("Could not load app.py from site root.");
+    }
   }
-  pyodide.FS.writeFile("app.py", appSource);
 
-  setProgress(100, "Python ready");
-  hideProgressSoon();
+  pyodide.FS.writeFile("app.py", appSourceCache);
 }
 
 function setProgress(percent, label) {
@@ -283,7 +316,10 @@ async function runPython() {
     setProgress(10, "Waiting for Python to be ready...");
     await pyodideReadyPromise;
 
-    setProgress(35, "Reading CSV files...");
+    setProgress(35, "Loading model code...");
+    await ensureAppModuleLoaded();
+
+    setProgress(50, "Reading CSV files...");
     const text1 = await file1.text();
     const text2 = await file2.text();
 
@@ -308,7 +344,7 @@ async function runPython() {
       do_plots: false
     };
 
-    setProgress(55, "Running model...");
+    setProgress(65, "Running model...");
     pyodide.globals.set("config_js", config);
 
     await pyodide.runPythonAsync(`
