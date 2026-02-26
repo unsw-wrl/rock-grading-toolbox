@@ -3,74 +3,341 @@
 <head>
   <meta charset="UTF-8">
   <title>Rock Grading Tool</title>
+  <style>
+    body {
+      font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+      max-width: 900px;
+      margin: 24px auto;
+      padding: 0 16px;
+      line-height: 1.4;
+    }
+
+    .row {
+      margin-bottom: 10px;
+    }
+
+    .controls {
+      border: 1px solid #dcdcdc;
+      border-radius: 8px;
+      padding: 14px;
+      margin-bottom: 12px;
+      background: #fafafa;
+    }
+
+    .progress-wrap {
+      margin-top: 12px;
+      display: none;
+    }
+
+    .progress-label {
+      font-size: 13px;
+      margin-bottom: 6px;
+      color: #333;
+    }
+
+    .progress-track {
+      width: 100%;
+      height: 12px;
+      border-radius: 999px;
+      background: #e6e6e6;
+      overflow: hidden;
+    }
+
+    .progress-fill {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, #198754, #3bb273);
+      transition: width 0.2s ease;
+    }
+
+    #output {
+      margin-top: 14px;
+      white-space: pre-wrap;
+      border: 1px solid #dcdcdc;
+      border-radius: 8px;
+      padding: 12px;
+      min-height: 80px;
+      background: #fff;
+    }
+
+    .error {
+      color: #b02a37;
+    }
+
+    .plots {
+      margin-top: 14px;
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 12px;
+    }
+
+    .plot-card {
+      border: 1px solid #dcdcdc;
+      border-radius: 8px;
+      padding: 8px;
+      background: #fff;
+      min-height: 280px;
+    }
+  </style>
 </head>
 <body>
 
 <h2>Rock Grading Tool</h2>
 
-<label>Upload CSV 1:</label>
-<input type="file" id="file1"><br>
-<label>Total Mass (kg):</label>
-<input type="number" id="mass1" value="20"><br>
-<label>Shape Factor:</label>
-<input type="number" id="shape1" value="0.9" step="0.01"><br><br>
+<div class="controls">
+  <div class="row">
+    <label>Upload CSV 1:</label>
+    <input type="file" id="file1">
+  </div>
+  <div class="row">
+    <label>Total Mass (kg):</label>
+    <input type="number" id="mass1" value="20">
+  </div>
+  <div class="row">
+    <label>Shape Factor:</label>
+    <input type="number" id="shape1" value="0.9" step="0.01">
+  </div>
 
-<label>Upload CSV 2:</label>
-<input type="file" id="file2"><br>
-<label>Total Mass (kg):</label>
-<input type="number" id="mass2" value="20"><br>
-<label>Shape Factor:</label>
-<input type="number" id="shape2" value="0.9" step="0.01"><br><br>
+  <div class="row" style="margin-top: 16px;">
+    <label>Upload CSV 2:</label>
+    <input type="file" id="file2">
+  </div>
+  <div class="row">
+    <label>Total Mass (kg):</label>
+    <input type="number" id="mass2" value="20">
+  </div>
+  <div class="row">
+    <label>Shape Factor:</label>
+    <input type="number" id="shape2" value="0.9" step="0.01">
+  </div>
 
-<button onclick="runPython()">Run Model</button>
+  <button id="runButton" onclick="runPython()">Run Model</button>
+
+  <div class="progress-wrap" id="progressWrap">
+    <div class="progress-label" id="progressLabel">Starting...</div>
+    <div class="progress-track">
+      <div class="progress-fill" id="progressFill"></div>
+    </div>
+  </div>
+</div>
 
 <div id="output"></div>
+<div class="plots">
+  <div id="massPlot" class="plot-card"></div>
+  <div id="dnPlot" class="plot-card"></div>
+</div>
 
 <script src="https://cdn.jsdelivr.net/pyodide/v0.26.2/full/pyodide.js"></script>
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
 
 <script>
 let pyodide;
+const pyodideReadyPromise = initPyodide();
 
 async function initPyodide() {
+  setProgress(5, "Loading Python runtime...");
   pyodide = await loadPyodide();
+
+  setProgress(25, "Loading Python packages (first run can take a while)...");
   await pyodide.loadPackage(["numpy", "pandas", "matplotlib"]);
+
+  setProgress(45, "Loading model code (app.py)...");
+  let appSource = "";
+  try {
+    const resp = await fetch("./app.py", { cache: "no-store" });
+    if (!resp.ok) {
+      throw new Error(`HTTP ${resp.status}`);
+    }
+    appSource = await resp.text();
+  } catch (e) {
+    throw new Error("Could not load app.py. This works on GitHub Pages or any local HTTP server (not file://).");
+  }
+  pyodide.FS.writeFile("app.py", appSource);
+
+  setProgress(100, "Python ready");
+  hideProgressSoon();
 }
 
-initPyodide();
+function setProgress(percent, label) {
+  const wrap = document.getElementById("progressWrap");
+  const fill = document.getElementById("progressFill");
+  const text = document.getElementById("progressLabel");
+  wrap.style.display = "block";
+  fill.style.width = `${percent}%`;
+  text.textContent = label;
+}
+
+function hideProgressSoon() {
+  setTimeout(() => {
+    const wrap = document.getElementById("progressWrap");
+    wrap.style.display = "none";
+  }, 600);
+}
+
+function renderResult(result) {
+  const out = document.getElementById("output");
+  const massCount = result.mass_curve ? result.mass_curve.length : 0;
+  const dnCount = result.dn_curve ? result.dn_curve.length : 0;
+
+  let text = "Model completed.\n";
+  text += `Sources: ${result.sources.join(", ")}\n`;
+  text += `Mass curve points: ${massCount}\n`;
+  text += `Dn curve points: ${dnCount}\n`;
+
+  if (result.target_mix_fit_mse !== undefined) {
+    text += `Target mix fit MSE: ${result.target_mix_fit_mse}\n`;
+    text += "Target mix weights:\n";
+    for (const [name, weight] of Object.entries(result.target_mix_weights || {})) {
+      text += `  ${name}: ${(100 * weight).toFixed(2)}%\n`;
+    }
+  }
+
+  out.classList.remove("error");
+  out.textContent = text;
+  renderPlots(result);
+}
+
+function renderPlots(result) {
+  if (typeof Plotly === "undefined") {
+    return;
+  }
+
+  const massX = (result.mass_curve || []).map((p) => p.mass_g);
+  const massY = (result.mass_curve || []).map((p) => p.pct_passing);
+  const dnX = (result.dn_curve || []).map((p) => p.Dn_mm);
+  const dnY = (result.dn_curve || []).map((p) => p.pct_passing);
+
+  Plotly.newPlot(
+    "massPlot",
+    [
+      {
+        x: massX,
+        y: massY,
+        type: "scatter",
+        mode: "lines",
+        name: "Combined",
+        line: { color: "#1f77b4", width: 2.5 }
+      }
+    ],
+    {
+      title: "Mass Distribution",
+      xaxis: { title: "Mass (g)" },
+      yaxis: { title: "Percentage Passing (%)", range: [0, 100] },
+      margin: { l: 55, r: 20, t: 45, b: 50 }
+    },
+    { responsive: true, displaylogo: false }
+  );
+
+  const dnTraces = [
+    {
+      x: dnX,
+      y: dnY,
+      type: "scatter",
+      mode: "lines",
+      name: "Combined",
+      line: { color: "#ff7f0e", width: 2.5 }
+    }
+  ];
+
+  if (result.final_mix_dn_curve) {
+    dnTraces.push({
+      x: result.final_mix_dn_curve.map((p) => p.Dn_mm),
+      y: result.final_mix_dn_curve.map((p) => p.pct_passing),
+      type: "scatter",
+      mode: "lines",
+      name: "Final Mix",
+      line: { color: "#2ca02c", width: 2.5, dash: "dash" }
+    });
+  }
+
+  Plotly.newPlot(
+    "dnPlot",
+    dnTraces,
+    {
+      title: "Nominal Diameter Distribution",
+      xaxis: { title: "Equivalent Nominal Diameter Dn (mm)" },
+      yaxis: { title: "Percentage Passing (%)", range: [0, 100] },
+      margin: { l: 55, r: 20, t: 45, b: 50 }
+    },
+    { responsive: true, displaylogo: false }
+  );
+}
 
 async function runPython() {
+  const runButton = document.getElementById("runButton");
+  const out = document.getElementById("output");
 
-  const file1 = document.getElementById("file1").files[0];
-  const file2 = document.getElementById("file2").files[0];
+  try {
+    out.classList.remove("error");
+    out.textContent = "";
 
-  const text1 = await file1.text();
-  const text2 = await file2.text();
+    const file1 = document.getElementById("file1").files[0];
+    const file2 = document.getElementById("file2").files[0];
 
-  const mass1 = parseFloat(document.getElementById("mass1").value);
-  const mass2 = parseFloat(document.getElementById("mass2").value);
-
-  const shape1 = parseFloat(document.getElementById("shape1").value);
-  const shape2 = parseFloat(document.getElementById("shape2").value);
-
-  const distributions = {
-    dist1: {
-      csv_text: text1,
-      total_mass_kg: mass1,
-      shape_factor: shape1
-    },
-    dist2: {
-      csv_text: text2,
-      total_mass_kg: mass2,
-      shape_factor: shape2
+    if (!file1 || !file2) {
+      throw new Error("Please upload both CSV files before running the model.");
     }
-  };
 
-  pyodide.globals.set("distributions_js", distributions);
+    runButton.disabled = true;
 
-  await pyodide.runPythonAsync(`
+    setProgress(10, "Waiting for Python to be ready...");
+    await pyodideReadyPromise;
+
+    setProgress(35, "Reading CSV files...");
+    const text1 = await file1.text();
+    const text2 = await file2.text();
+
+    const mass1 = parseFloat(document.getElementById("mass1").value);
+    const mass2 = parseFloat(document.getElementById("mass2").value);
+    const shape1 = parseFloat(document.getElementById("shape1").value);
+    const shape2 = parseFloat(document.getElementById("shape2").value);
+
+    const config = {
+      distributions: {
+        dist1: {
+          csv_text: text1,
+          total_mass_kg: mass1,
+          shape_factor: shape1
+        },
+        dist2: {
+          csv_text: text2,
+          total_mass_kg: mass2,
+          shape_factor: shape2
+        }
+      },
+      do_plots: false
+    };
+
+    setProgress(55, "Running model...");
+    pyodide.globals.set("config_js", config);
+
+    await pyodide.runPythonAsync(`
+import json
 from app import run_model
-run_model(distributions_js)
-  `);
+
+config = config_js.to_py()
+result = run_model(config)
+result_json = json.dumps(result)
+    `);
+
+    setProgress(90, "Formatting results...");
+    const resultJson = pyodide.globals.get("result_json");
+    const result = JSON.parse(resultJson);
+
+    renderResult(result);
+    setProgress(100, "Done");
+    hideProgressSoon();
+  } catch (err) {
+    out.classList.add("error");
+    out.textContent = `Error: ${err.message || err}`;
+    if (typeof Plotly !== "undefined") {
+      Plotly.purge("massPlot");
+      Plotly.purge("dnPlot");
+    }
+    setProgress(100, "Run failed");
+  } finally {
+    runButton.disabled = false;
+  }
 }
 </script>
 

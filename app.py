@@ -111,9 +111,14 @@ def fit_source_weights_cdf(
 # MAIN ENTRY FUNCTION
 # -----------------------------
 def run_model(config):
+    # Support both full config {"distributions": {...}} and raw distributions dict
+    if "distributions" in config:
+        distributions = config.get("distributions", {})
+    else:
+        distributions = config
 
-    distributions = config.get("distributions", {})
     target_mix = config.get("target_mix", {})
+    do_plots = bool(config.get("do_plots", False))
 
     combined_list = []
     mass_curves_individual = []
@@ -148,6 +153,9 @@ def run_model(config):
             }
         )
 
+    if len(combined_list) == 0:
+        raise ValueError("No valid distributions were provided.")
+
     combined_df = pd.concat(combined_list)
 
     mass_df = build_passing_curve(combined_df, "mass_g")
@@ -157,6 +165,8 @@ def run_model(config):
     # TARGET MIX SOLVER
     # -----------------------------
     final_mix_dn_df = None
+    w = None
+    fit_err = None
 
     if target_mix.get("enabled", False) and len(source_rows) > 0:
 
@@ -192,7 +202,7 @@ def run_model(config):
         print("Fit MSE:", fit_err)
 
         for src, weight in zip(source_rows, w):
-            print(src["label"], "→", round(100 * weight, 2), "%")
+            print(src["label"], "->", round(100 * weight, 2), "%")
 
         # Build final recommended distribution
         frames = []
@@ -207,30 +217,51 @@ def run_model(config):
     # -----------------------------
     # PLOTS
     # -----------------------------
-    plt.figure()
-    for label, curve in mass_curves_individual:
-        plt.plot(curve["mass_g"], curve["pct_passing"], label=label)
-    plt.plot(mass_df["mass_g"], mass_df["pct_passing"], linewidth=2)
-    plt.xlabel("Mass (g)")
-    plt.ylabel("Percentage Passing (%)")
-    plt.title("Mass Distribution")
-    plt.legend()
-    plt.show()
+    if do_plots:
+        plt.figure()
+        for label, curve in mass_curves_individual:
+            plt.plot(curve["mass_g"], curve["pct_passing"], label=label)
+        plt.plot(mass_df["mass_g"], mass_df["pct_passing"], linewidth=2)
+        plt.xlabel("Mass (g)")
+        plt.ylabel("Percentage Passing (%)")
+        plt.title("Mass Distribution")
+        plt.legend()
+        plt.show()
 
-    plt.figure()
-    for label, curve in dn_curves_individual:
-        plt.plot(curve["Dn_mm"], curve["pct_passing"], label=label)
-    plt.plot(dn_df["Dn_mm"], dn_df["pct_passing"], linewidth=2)
+        plt.figure()
+        for label, curve in dn_curves_individual:
+            plt.plot(curve["Dn_mm"], curve["pct_passing"], label=label)
+        plt.plot(dn_df["Dn_mm"], dn_df["pct_passing"], linewidth=2)
+
+        if final_mix_dn_df is not None:
+            plt.plot(
+                final_mix_dn_df["Dn_mm"],
+                final_mix_dn_df["pct_passing"],
+                linewidth=3,
+            )
+
+        plt.xlabel("Equivalent Nominal Diameter Dn (mm)")
+        plt.ylabel("Percentage Passing (%)")
+        plt.title("Nominal Diameter Distribution")
+        plt.legend()
+        plt.show()
+
+    result = {
+        "sources": [src["label"] for src in source_rows],
+        "mass_curve": mass_df[["mass_g", "pct_passing"]].to_dict(orient="records"),
+        "dn_curve": dn_df[["Dn_mm", "pct_passing"]].to_dict(orient="records"),
+    }
+
+    if w is not None and fit_err is not None:
+        result["target_mix_fit_mse"] = float(fit_err)
+        result["target_mix_weights"] = {
+            src["label"]: float(weight)
+            for src, weight in zip(source_rows, w)
+        }
 
     if final_mix_dn_df is not None:
-        plt.plot(
-            final_mix_dn_df["Dn_mm"],
-            final_mix_dn_df["pct_passing"],
-            linewidth=3,
-        )
+        result["final_mix_dn_curve"] = final_mix_dn_df[
+            ["Dn_mm", "pct_passing"]
+        ].to_dict(orient="records")
 
-    plt.xlabel("Equivalent Nominal Diameter Dn (mm)")
-    plt.ylabel("Percentage Passing (%)")
-    plt.title("Nominal Diameter Distribution")
-    plt.legend()
-    plt.show()
+    return result
