@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Rock Grading Tool</title>
+</head>
+<body>
+
+<h2>Rock Grading Tool</h2>
+
+<label>Upload CSV 1:</label>
+<input type="file" id="file1"><br>
+<label>Total Mass (kg):</label>
+<input type="number" id="mass1" value="20"><br>
+<label>Shape Factor:</label>
+<input type="number" id="shape1" value="0.9" step="0.01"><br><br>
+
+<label>Upload CSV 2:</label>
+<input type="file" id="file2"><br>
+<label>Total Mass (kg):</label>
+<input type="number" id="mass2" value="20"><br>
+<label>Shape Factor:</label>
+<input type="number" id="shape2" value="0.9" step="0.01"><br><br>
+
+<button onclick="runPython()">Run Model</button>
+
+<div id="output"></div>
+
+<script src="https://cdn.jsdelivr.net/pyodide/v0.26.2/full/pyodide.js"></script>
+
+<script>
+let pyodide;
+
+async function initPyodide() {
+  pyodide = await loadPyodide();
+  await pyodide.loadPackage(["numpy", "pandas", "matplotlib"]);
+}
+
+initPyodide();
+
+async function runPython() {
+
+  const file1 = document.getElementById("file1").files[0];
+  const file2 = document.getElementById("file2").files[0];
+
+  const text1 = await file1.text();
+  const text2 = await file2.text();
+
+  const mass1 = parseFloat(document.getElementById("mass1").value);
+  const mass2 = parseFloat(document.getElementById("mass2").value);
+
+  const shape1 = parseFloat(document.getElementById("shape1").value);
+  const shape2 = parseFloat(document.getElementById("shape2").value);
+
+  const distributions = {
+    dist1: {
+      csv_text: text1,
+      total_mass_kg: mass1,
+      shape_factor: shape1
+    },
+    dist2: {
+      csv_text: text2,
+      total_mass_kg: mass2,
+      shape_factor: shape2
+    }
+  };
+
+  pyodide.globals.set("distributions_js", distributions);
+
+  await pyodide.runPythonAsync(`
+from app import run_model
+run_model(distributions_js)
+  `);
+}
+</script>
+
+</body>
+</html>
