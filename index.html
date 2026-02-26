@@ -64,6 +64,44 @@
       color: #b02a37;
     }
 
+    .manual-adds {
+      margin-top: 14px;
+      border: 1px dashed #c8c8c8;
+      border-radius: 8px;
+      padding: 10px;
+      background: #ffffff;
+    }
+
+    .manual-adds h3 {
+      margin: 0 0 8px;
+      font-size: 15px;
+    }
+
+    .manual-item {
+      border: 1px solid #e2e2e2;
+      border-radius: 8px;
+      padding: 8px;
+      margin-bottom: 8px;
+      background: #fafafa;
+    }
+
+    .manual-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      gap: 8px;
+      align-items: end;
+    }
+
+    .manual-grid label {
+      font-size: 12px;
+      color: #444;
+    }
+
+    .manual-grid input {
+      width: 100%;
+      box-sizing: border-box;
+    }
+
     .plots {
       margin-top: 14px;
       display: grid;
@@ -76,7 +114,7 @@
       border-radius: 8px;
       padding: 8px;
       background: #fff;
-      min-height: 280px;
+      min-height: 420px;
     }
   </style>
 </head>
@@ -111,6 +149,12 @@
     <input type="number" id="shape2" value="0.9" step="0.01">
   </div>
 
+  <div class="manual-adds">
+    <h3>Manual Dn Additions (Optional)</h3>
+    <div id="manualAddsList"></div>
+    <button type="button" id="addManualBtn" onclick="addManualAddRow()">Add Manual Range</button>
+  </div>
+
   <button id="runButton" onclick="runPython()">Run Model</button>
   <input type="file" id="appPyFile" accept=".py,text/x-python" style="display:none">
 
@@ -134,6 +178,7 @@
 <script>
 let pyodide;
 let appSourceCache = null;
+let manualAddCounter = 0;
 const pyodideReadyPromise = initPyodide();
 
 async function initPyodide() {
@@ -230,26 +275,138 @@ function renderResult(result) {
   renderPlots(result);
 }
 
+function addManualAddRow(prefill = null) {
+  manualAddCounter += 1;
+  const id = `manual_add_${manualAddCounter}`;
+  const wrap = document.createElement("div");
+  wrap.className = "manual-item";
+  wrap.dataset.manualId = id;
+
+  const d = prefill || {};
+  wrap.innerHTML = `
+    <div class="manual-grid">
+      <div><label>Label</label><input type="text" class="manual-label" value="${d.label || id}"></div>
+      <div><label>Total Mass (kg)</label><input type="number" class="manual-total" min="0" step="any" value="${d.total_mass_kg ?? ""}"></div>
+      <div><label>Dn Min (mm)</label><input type="number" class="manual-dn-min" min="0" step="any" value="${d.dn_min_mm ?? ""}"></div>
+      <div><label>Dn Max (mm)</label><input type="number" class="manual-dn-max" min="0" step="any" value="${d.dn_max_mm ?? ""}"></div>
+      <div><label>Shape Factor</label><input type="number" class="manual-shape" min="0" step="any" value="${d.shape_factor ?? 0.9}"></div>
+      <div><label>Points</label><input type="number" class="manual-n-points" min="2" step="1" value="${d.n_points ?? 30}"></div>
+      <div><button type="button" class="manual-remove">Remove</button></div>
+    </div>
+  `;
+
+  wrap.querySelector(".manual-remove").addEventListener("click", () => {
+    wrap.remove();
+  });
+
+  document.getElementById("manualAddsList").appendChild(wrap);
+}
+
+function collectManualAdds() {
+  const rows = Array.from(document.querySelectorAll("#manualAddsList .manual-item"));
+  const out = {};
+
+  for (let i = 0; i < rows.length; i += 1) {
+    const row = rows[i];
+    const rowNum = i + 1;
+    const labelRaw = row.querySelector(".manual-label").value.trim();
+    const totalRaw = row.querySelector(".manual-total").value;
+    const dnMinRaw = row.querySelector(".manual-dn-min").value;
+    const dnMaxRaw = row.querySelector(".manual-dn-max").value;
+    const shapeRaw = row.querySelector(".manual-shape").value;
+    const pointsRaw = row.querySelector(".manual-n-points").value;
+
+    const allEmpty = !labelRaw && !totalRaw && !dnMinRaw && !dnMaxRaw && !shapeRaw && !pointsRaw;
+    if (allEmpty) {
+      continue;
+    }
+
+    const totalMassKg = parseFloat(totalRaw);
+    const dnMinMm = parseFloat(dnMinRaw);
+    const dnMaxMm = parseFloat(dnMaxRaw);
+    const shapeFactor = parseFloat(shapeRaw);
+    const nPoints = parseInt(pointsRaw || "30", 10);
+
+    if (!Number.isFinite(totalMassKg) || totalMassKg <= 0) {
+      throw new Error(`Manual add row ${rowNum}: total mass must be > 0.`);
+    }
+    if (!Number.isFinite(dnMinMm) || dnMinMm <= 0) {
+      throw new Error(`Manual add row ${rowNum}: Dn min must be > 0.`);
+    }
+    if (!Number.isFinite(dnMaxMm) || dnMaxMm <= 0) {
+      throw new Error(`Manual add row ${rowNum}: Dn max must be > 0.`);
+    }
+    if (!Number.isFinite(shapeFactor) || shapeFactor <= 0) {
+      throw new Error(`Manual add row ${rowNum}: shape factor must be > 0.`);
+    }
+    if (!Number.isFinite(nPoints) || nPoints < 2) {
+      throw new Error(`Manual add row ${rowNum}: points must be at least 2.`);
+    }
+
+    let label = labelRaw || `manual_${rowNum}`;
+    let suffix = 2;
+    while (Object.prototype.hasOwnProperty.call(out, label)) {
+      label = `${labelRaw || `manual_${rowNum}`}_${suffix}`;
+      suffix += 1;
+    }
+
+    out[label] = {
+      total_mass_kg: totalMassKg,
+      dn_min_mm: dnMinMm,
+      dn_max_mm: dnMaxMm,
+      shape_factor: shapeFactor,
+      n_points: nPoints
+    };
+  }
+
+  return out;
+}
+
 function renderPlots(result) {
   if (typeof Plotly === "undefined") {
     return;
   }
+
+  const sourcePalette = [
+    "rgba(31,119,180,0.45)",
+    "rgba(255,127,14,0.45)",
+    "rgba(44,160,44,0.45)",
+    "rgba(214,39,40,0.45)",
+    "rgba(148,103,189,0.45)",
+    "rgba(140,86,75,0.45)",
+    "rgba(227,119,194,0.45)",
+    "rgba(127,127,127,0.45)",
+    "rgba(188,189,34,0.45)",
+    "rgba(23,190,207,0.45)"
+  ];
 
   const massX = (result.mass_curve || []).map((p) => p.mass_g);
   const massY = (result.mass_curve || []).map((p) => p.pct_passing);
   const dnX = (result.dn_curve || []).map((p) => p.Dn_mm);
   const dnY = (result.dn_curve || []).map((p) => p.pct_passing);
 
+  const sourceMassTraces = Object.entries(result.source_mass_curves || {}).map(
+    ([label, points], idx) => ({
+      x: points.map((p) => p.mass_g),
+      y: points.map((p) => p.pct_passing),
+      type: "scatter",
+      mode: "lines",
+      name: label,
+      line: { color: sourcePalette[idx % sourcePalette.length], width: 1.6 }
+    })
+  );
+
   Plotly.newPlot(
     "massPlot",
     [
+      ...sourceMassTraces,
       {
         x: massX,
         y: massY,
         type: "scatter",
         mode: "lines",
         name: "Combined",
-        line: { color: "#1f77b4", width: 2.5 }
+        line: { color: "#000000", width: 3 }
       }
     ],
     {
@@ -261,14 +418,26 @@ function renderPlots(result) {
     { responsive: true, displaylogo: false }
   );
 
+  const sourceDnTraces = Object.entries(result.source_dn_curves || {}).map(
+    ([label, points], idx) => ({
+      x: points.map((p) => p.Dn_mm),
+      y: points.map((p) => p.pct_passing),
+      type: "scatter",
+      mode: "lines",
+      name: label,
+      line: { color: sourcePalette[idx % sourcePalette.length], width: 1.6 }
+    })
+  );
+
   const dnTraces = [
+    ...sourceDnTraces,
     {
       x: dnX,
       y: dnY,
       type: "scatter",
       mode: "lines",
       name: "Combined",
-      line: { color: "#ff7f0e", width: 2.5 }
+      line: { color: "#000000", width: 3 }
     }
   ];
 
@@ -307,10 +476,6 @@ async function runPython() {
     const file1 = document.getElementById("file1").files[0];
     const file2 = document.getElementById("file2").files[0];
 
-    if (!file1 || !file2) {
-      throw new Error("Please upload both CSV files before running the model.");
-    }
-
     runButton.disabled = true;
 
     setProgress(10, "Waiting for Python to be ready...");
@@ -319,28 +484,39 @@ async function runPython() {
     setProgress(35, "Loading model code...");
     await ensureAppModuleLoaded();
 
-    setProgress(50, "Reading CSV files...");
-    const text1 = await file1.text();
-    const text2 = await file2.text();
+    setProgress(50, "Reading inputs...");
 
     const mass1 = parseFloat(document.getElementById("mass1").value);
     const mass2 = parseFloat(document.getElementById("mass2").value);
     const shape1 = parseFloat(document.getElementById("shape1").value);
     const shape2 = parseFloat(document.getElementById("shape2").value);
+    const manualAdds = collectManualAdds();
+
+    const distributions = {};
+    if (file1) {
+      const text1 = await file1.text();
+      distributions.dist1 = {
+        csv_text: text1,
+        total_mass_kg: mass1,
+        shape_factor: shape1
+      };
+    }
+    if (file2) {
+      const text2 = await file2.text();
+      distributions.dist2 = {
+        csv_text: text2,
+        total_mass_kg: mass2,
+        shape_factor: shape2
+      };
+    }
+
+    if (Object.keys(distributions).length === 0 && Object.keys(manualAdds).length === 0) {
+      throw new Error("Provide at least one CSV distribution or one manual Dn addition.");
+    }
 
     const config = {
-      distributions: {
-        dist1: {
-          csv_text: text1,
-          total_mass_kg: mass1,
-          shape_factor: shape1
-        },
-        dist2: {
-          csv_text: text2,
-          total_mass_kg: mass2,
-          shape_factor: shape2
-        }
-      },
+      distributions,
+      manual_adds: manualAdds,
       do_plots: false
     };
 

@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import re
 from io import StringIO
 
 # -----------------------------
@@ -13,13 +14,30 @@ rho_s = 2.65  # g/cm^3
 # CORE PROCESSING
 # -----------------------------
 def process_distribution(csv_text, total_mass_kg, shape_factor):
-    df = pd.read_csv(StringIO(csv_text), skiprows=1, header=None)
-    df.columns = ["mass_g", "mass_fraction_percent"]
+    numeric_rows = []
+    for line in str(csv_text).splitlines():
+        vals = re.findall(r"[-+]?(?:\d*\.\d+|\d+)(?:[eE][-+]?\d+)?", line)
+        if len(vals) < 2:
+            continue
+        numeric_rows.append((float(vals[0]), float(vals[1])))
+
+    if not numeric_rows:
+        raise ValueError(
+            "Could not parse CSV: expected lines containing at least two numeric values "
+            "(mass_g, mass_fraction_percent)."
+        )
+
+    df = pd.DataFrame(numeric_rows, columns=["mass_g", "mass_fraction_percent"])
 
     df = df[df["mass_g"] > 0].copy()
+    if df.empty:
+        raise ValueError("No positive mass rows found in CSV.")
 
     df["mass_fraction"] = df["mass_fraction_percent"] / 100.0
-    df["mass_fraction"] /= df["mass_fraction"].sum()
+    frac_sum = df["mass_fraction"].sum()
+    if frac_sum <= 0:
+        raise ValueError("CSV mass fractions sum to zero or negative.")
+    df["mass_fraction"] /= frac_sum
 
     V = df["mass_g"] / rho_s
     D_sphere_cm = ((6 * V) / np.pi) ** (1 / 3)
@@ -29,6 +47,35 @@ def process_distribution(csv_text, total_mass_kg, shape_factor):
     df["actual_mass_kg"] = df["mass_fraction"] * total_mass_kg
 
     return df[["mass_g", "Dn_mm", "actual_mass_kg"]]
+
+
+def process_manual_add(total_mass_kg, dn_min_mm, dn_max_mm, shape_factor, n_points=30):
+    n_points = max(2, int(n_points))
+    dn_min = float(dn_min_mm)
+    dn_max = float(dn_max_mm)
+    if dn_max < dn_min:
+        dn_min, dn_max = dn_max, dn_min
+
+    shape = float(shape_factor)
+    if shape <= 0:
+        raise ValueError("Manual add shape_factor must be > 0.")
+
+    dn = np.linspace(dn_min, dn_max, n_points)
+    mass_each_kg = float(total_mass_kg) / n_points
+    actual_mass_kg = np.full(n_points, mass_each_kg, dtype=float)
+
+    # Convert nominal diameter back to mass so mass-based curves can be built.
+    d_sphere_cm = (dn / shape) / 10.0
+    vol_cm3 = (np.pi / 6.0) * (d_sphere_cm ** 3)
+    mass_g = rho_s * vol_cm3
+
+    return pd.DataFrame(
+        {
+            "mass_g": mass_g,
+            "Dn_mm": dn,
+            "actual_mass_kg": actual_mass_kg,
+        }
+    )
 
 
 def build_passing_curve(df, x_col):
@@ -118,6 +165,7 @@ def run_model(config):
         distributions = config
 
     target_mix = config.get("target_mix", {})
+    manual_adds = config.get("manual_adds", {})
     do_plots = bool(config.get("do_plots", False))
 
     combined_list = []
@@ -149,6 +197,33 @@ def run_model(config):
             {
                 "label": label,
                 "df": df_processed.copy(),
+                "current_mass_kg": float(cfg["total_mass_kg"]),
+            }
+        )
+
+    # -----------------------------
+    # Process Manual Additions
+    # -----------------------------
+    for label, cfg in manual_adds.items():
+        df_manual = process_manual_add(
+            total_mass_kg=float(cfg["total_mass_kg"]),
+            dn_min_mm=float(cfg["dn_min_mm"]),
+            dn_max_mm=float(cfg["dn_max_mm"]),
+            shape_factor=float(cfg["shape_factor"]),
+            n_points=int(cfg.get("n_points", 30)),
+        )
+
+        mass_curves_individual.append(
+            (str(label), build_passing_curve(df_manual, "mass_g"))
+        )
+        dn_curves_individual.append(
+            (str(label), build_passing_curve(df_manual, "Dn_mm"))
+        )
+        combined_list.append(df_manual)
+        source_rows.append(
+            {
+                "label": str(label),
+                "df": df_manual.copy(),
                 "current_mass_kg": float(cfg["total_mass_kg"]),
             }
         )
@@ -250,6 +325,14 @@ def run_model(config):
         "sources": [src["label"] for src in source_rows],
         "mass_curve": mass_df[["mass_g", "pct_passing"]].to_dict(orient="records"),
         "dn_curve": dn_df[["Dn_mm", "pct_passing"]].to_dict(orient="records"),
+        "source_mass_curves": {
+            label: curve[["mass_g", "pct_passing"]].to_dict(orient="records")
+            for label, curve in mass_curves_individual
+        },
+        "source_dn_curves": {
+            label: curve[["Dn_mm", "pct_passing"]].to_dict(orient="records")
+            for label, curve in dn_curves_individual
+        },
     }
 
     if w is not None and fit_err is not None:
