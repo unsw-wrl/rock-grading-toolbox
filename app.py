@@ -154,6 +154,230 @@ def fit_source_weights_cdf(
     return w, mse
 
 
+def build_required_mix_distribution(source_rows, required_mass_kg):
+    frames = []
+    for src, req_kg in zip(source_rows, required_mass_kg):
+        cur_kg = float(src["current_mass_kg"])
+        if cur_kg <= 0:
+            continue
+        scale = float(req_kg) / cur_kg
+        dfw = src["df"].copy()
+        dfw["actual_mass_kg"] = dfw["actual_mass_kg"] * scale
+        frames.append(dfw)
+    if not frames:
+        return pd.DataFrame(columns=["mass_g", "Dn_mm", "actual_mass_kg"])
+    return pd.concat(frames, ignore_index=True)
+
+
+def build_target_cdf_from_points(dn_grid, dn_targets):
+    if not dn_targets:
+        raise ValueError("At least one Dn target point is required.")
+
+    pts = sorted(
+        [(float(t["dn_mm"]), float(t["pct_passing"]) / 100.0) for t in dn_targets],
+        key=lambda p: p[0],
+    )
+    xk = np.array([p[0] for p in pts], dtype=float)
+    yk = np.array([p[1] for p in pts], dtype=float)
+
+    xk_unique = [xk[0]]
+    yk_unique = [yk[0]]
+    for i in range(1, len(xk)):
+        if abs(xk[i] - xk_unique[-1]) < 1e-12:
+            yk_unique[-1] = yk[i]
+        else:
+            xk_unique.append(xk[i])
+            yk_unique.append(yk[i])
+
+    xk = np.array(xk_unique, dtype=float)
+    yk = np.array(yk_unique, dtype=float)
+    yk = np.clip(yk, 0.0, 1.0)
+
+    return np.interp(dn_grid, xk, yk, left=0.0, right=1.0)
+
+
+def calculate_mix(config):
+    distributions = config.get("distributions", {})
+    manual_adds = config.get("manual_adds", {})
+    target_spec = config.get("target_spec", {})
+
+    target_total_mass_kg = float(target_spec.get("target_total_mass_kg", 0.0))
+    dn_targets = target_spec.get("dn_targets", [])
+    if target_total_mass_kg <= 0:
+        raise ValueError("target_total_mass_kg must be > 0.")
+    if not dn_targets:
+        raise ValueError("At least one target value is required for mix calculation.")
+
+    source_rows = []
+
+    for label, cfg in distributions.items():
+        df_processed = process_distribution(
+            cfg["csv_text"],
+            float(cfg["total_mass_kg"]),
+            float(cfg["shape_factor"]),
+        )
+        source_rows.append(
+            {
+                "label": str(label),
+                "df": df_processed.copy(),
+                "current_mass_kg": float(cfg["total_mass_kg"]),
+            }
+        )
+
+    for label, cfg in manual_adds.items():
+        df_manual = process_manual_add(
+            total_mass_kg=float(cfg["total_mass_kg"]),
+            dn_min_mm=float(cfg["dn_min_mm"]),
+            dn_max_mm=float(cfg["dn_max_mm"]),
+            shape_factor=float(cfg["shape_factor"]),
+            n_points=int(cfg.get("n_points", 30)),
+        )
+        source_rows.append(
+            {
+                "label": str(label),
+                "df": df_manual.copy(),
+                "current_mass_kg": float(cfg["total_mass_kg"]),
+            }
+        )
+
+    if len(source_rows) == 0:
+        raise ValueError("At least one rock source is required for mix calculation.")
+
+    dn_all = np.concatenate([src["df"]["Dn_mm"].to_numpy(dtype=float) for src in source_rows])
+    target_dn = np.array([float(t["dn_mm"]) for t in dn_targets], dtype=float)
+    dn_min = float(min(np.min(dn_all), np.min(target_dn)))
+    dn_max = float(max(np.max(dn_all), np.max(target_dn)))
+    dn_grid = np.linspace(dn_min, dn_max, 220)
+
+    target_cdf_grid = build_target_cdf_from_points(dn_grid, dn_targets)
+    source_cdf_mat = np.zeros((len(dn_grid), len(source_rows)), dtype=float)
+
+    for j, src in enumerate(source_rows):
+        curve = build_passing_curve(src["df"], "Dn_mm")
+        x = curve["Dn_mm"].to_numpy(dtype=float)
+        y = (curve["pct_passing"].to_numpy(dtype=float) / 100.0)
+        source_cdf_mat[:, j] = np.interp(dn_grid, x, y, left=0.0, right=1.0)
+
+    w, fit_err = fit_source_weights_cdf(
+        source_cdf_mat,
+        target_cdf_grid,
+        min_source_fraction=float(target_spec.get("min_source_fraction", 0.0)),
+        diversity_penalty=float(target_spec.get("diversity_penalty", 0.01)),
+        max_iter=int(target_spec.get("max_iter", 3000)),
+        learning_rate=float(target_spec.get("learning_rate", 0.2)),
+    )
+
+    req_mass = w * target_total_mass_kg
+    cur_mass = np.array([float(src["current_mass_kg"]) for src in source_rows], dtype=float)
+    delta = req_mass - cur_mass
+
+    # Check if any single source alone already fits target grading + target mass.
+    single_source_fits = []
+    tol_pct = float(target_spec.get("single_source_tol_pct", 3.0))
+    target_pts_sorted = sorted(
+        [(float(t["dn_mm"]), float(t["pct_passing"])) for t in dn_targets],
+        key=lambda p: p[0],
+    )
+    pts_x = np.array([p[0] for p in target_pts_sorted], dtype=float)
+    pts_y = np.array([p[1] for p in target_pts_sorted], dtype=float)
+
+    for src in source_rows:
+        curve = build_passing_curve(src["df"], "Dn_mm")
+        src_x = curve["Dn_mm"].to_numpy(dtype=float)
+        src_y = curve["pct_passing"].to_numpy(dtype=float)
+        pred = np.interp(pts_x, src_x, src_y, left=0.0, right=100.0)
+        max_abs_diff = float(np.max(np.abs(pred - pts_y)))
+        if float(src["current_mass_kg"]) >= target_total_mass_kg and max_abs_diff <= tol_pct:
+            single_source_fits.append(
+                {
+                    "label": src["label"],
+                    "current_mass_kg": float(src["current_mass_kg"]),
+                    "max_abs_diff_pct": max_abs_diff,
+                }
+            )
+
+    target_on_grid = target_cdf_grid
+    recommendations = []
+    for src, wi, req_kg, dkg in zip(source_rows, w, req_mass, delta):
+        cdf_src = np.interp(
+            dn_grid,
+            build_passing_curve(src["df"], "Dn_mm")["Dn_mm"].to_numpy(dtype=float),
+            (build_passing_curve(src["df"], "Dn_mm")["pct_passing"].to_numpy(dtype=float) / 100.0),
+            left=0.0,
+            right=1.0,
+        )
+        diff = cdf_src - target_on_grid
+        i_fine = int(np.argmax(diff))
+        i_coarse = int(np.argmin(diff))
+
+        if float(dkg) >= 0:
+            guidance = "Need more of this source."
+            threshold_dn_mm = None
+            threshold_mass_g = None
+        else:
+            if abs(diff[i_fine]) >= abs(diff[i_coarse]):
+                guidance = f"Excess fines; remove material < {dn_grid[i_fine]:.2f} mm."
+                threshold_dn_mm = float(dn_grid[i_fine])
+            else:
+                guidance = f"Excess coarse; remove material > {dn_grid[i_coarse]:.2f} mm."
+                threshold_dn_mm = float(dn_grid[i_coarse])
+
+            df_sorted = src["df"].sort_values("Dn_mm")
+            threshold_mass_g = float(
+                np.interp(
+                    threshold_dn_mm,
+                    df_sorted["Dn_mm"].to_numpy(dtype=float),
+                    df_sorted["mass_g"].to_numpy(dtype=float),
+                    left=df_sorted["mass_g"].iloc[0],
+                    right=df_sorted["mass_g"].iloc[-1],
+                )
+            )
+
+        recommendations.append(
+            {
+                "source": src["label"],
+                "current_mass_kg": float(src["current_mass_kg"]),
+                "recommended_percent": float(100.0 * wi),
+                "recommended_mass_kg": float(req_kg),
+                "delta_kg_required_minus_current": float(dkg),
+                "guidance": guidance,
+                "threshold_dn_mm": threshold_dn_mm,
+                "threshold_mass_g": threshold_mass_g,
+            }
+        )
+
+    current_combined_df = pd.concat([src["df"] for src in source_rows], ignore_index=True)
+    current_mass_curve = build_passing_curve(current_combined_df, "mass_g")
+    current_dn_curve = build_passing_curve(current_combined_df, "Dn_mm")
+
+    final_mix_df = build_required_mix_distribution(source_rows, req_mass)
+    final_mass_curve = build_passing_curve(final_mix_df, "mass_g")
+    final_dn_curve = build_passing_curve(final_mix_df, "Dn_mm")
+
+    source_mass_curves = {}
+    source_dn_curves = {}
+    for src in source_rows:
+        source_mass_curves[src["label"]] = build_passing_curve(
+            src["df"], "mass_g"
+        )[["mass_g", "pct_passing"]].to_dict(orient="records")
+        source_dn_curves[src["label"]] = build_passing_curve(
+            src["df"], "Dn_mm"
+        )[["Dn_mm", "pct_passing"]].to_dict(orient="records")
+
+    return {
+        "fit_mse": float(fit_err),
+        "target_total_mass_kg": target_total_mass_kg,
+        "single_source_fits": single_source_fits,
+        "recommendations": recommendations,
+        "source_mass_curves": source_mass_curves,
+        "source_dn_curves": source_dn_curves,
+        "current_mass_curve": current_mass_curve[["mass_g", "pct_passing"]].to_dict(orient="records"),
+        "current_dn_curve": current_dn_curve[["Dn_mm", "pct_passing"]].to_dict(orient="records"),
+        "final_mass_curve": final_mass_curve[["mass_g", "pct_passing"]].to_dict(orient="records"),
+        "final_dn_curve": final_dn_curve[["Dn_mm", "pct_passing"]].to_dict(orient="records"),
+    }
+
+
 # -----------------------------
 # MAIN ENTRY FUNCTION
 # -----------------------------

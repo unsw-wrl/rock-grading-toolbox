@@ -60,6 +60,38 @@
       background: #fff;
     }
 
+    #mixOutput {
+      margin-top: 14px;
+      border: 1px solid #dcdcdc;
+      border-radius: 8px;
+      padding: 12px;
+      min-height: 80px;
+      background: #fff;
+    }
+
+    .mix-meta {
+      margin-bottom: 10px;
+      font-size: 14px;
+    }
+
+    .mix-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+
+    .mix-table th,
+    .mix-table td {
+      border: 1px solid #dcdcdc;
+      padding: 6px 8px;
+      text-align: left;
+      vertical-align: top;
+    }
+
+    .mix-table th {
+      background: #f5f5f5;
+    }
+
     .error {
       color: #b02a37;
     }
@@ -75,6 +107,12 @@
     .manual-adds h3 {
       margin: 0 0 8px;
       font-size: 15px;
+    }
+
+    .section-divider {
+      height: 1px;
+      background: #d8d8d8;
+      margin: 14px 0;
     }
 
     .manual-item {
@@ -123,39 +161,44 @@
 <h2>Rock Grading Tool</h2>
 
 <div class="controls">
-  <div class="row">
-    <label>Upload CSV 1:</label>
-    <input type="file" id="file1">
-  </div>
-  <div class="row">
-    <label>Total Mass (kg):</label>
-    <input type="number" id="mass1" value="20">
-  </div>
-  <div class="row">
-    <label>Shape Factor:</label>
-    <input type="number" id="shape1" value="0.9" step="0.01">
-  </div>
-
-  <div class="row" style="margin-top: 16px;">
-    <label>Upload CSV 2:</label>
-    <input type="file" id="file2">
-  </div>
-  <div class="row">
-    <label>Total Mass (kg):</label>
-    <input type="number" id="mass2" value="20">
-  </div>
-  <div class="row">
-    <label>Shape Factor:</label>
-    <input type="number" id="shape2" value="0.9" step="0.01">
+  <div class="manual-adds">
+    <h3>Mass distribution (.csv)</h3>
+    <div id="csvSourcesList"></div>
+    <button type="button" onclick="addCsvSourceRow()">Add CSV Distribution</button>
   </div>
 
   <div class="manual-adds">
-    <h3>Manual Dn Additions (Optional)</h3>
+    <h3>Nominal Diameter distribution (manual)</h3>
     <div id="manualAddsList"></div>
     <button type="button" id="addManualBtn" onclick="addManualAddRow()">Add Manual Range</button>
   </div>
 
-  <button id="runButton" onclick="runPython()">Run Model</button>
+  <div class="section-divider"></div>
+
+  <div class="manual-adds">
+    <h3>Mass Targets</h3>
+    <div id="massTargetsList"></div>
+    <button type="button" onclick="addMassTargetRow()">Add Manual Targets</button>
+    <button type="button" onclick="importTargetCsv('mass')">Add CSV Target</button>
+  </div>
+
+  <div class="manual-adds">
+    <h3>Dn Targets</h3>
+    <div id="dnTargetsList"></div>
+    <button type="button" onclick="addDnTargetRow()">Add Manual Targets</button>
+    <button type="button" onclick="importTargetCsv('dn')">Add CSV Target</button>
+  </div>
+
+  <div class="manual-adds">
+    <h3>Mix Calculator</h3>
+    <div class="row">
+      <label>Target Total Mass (kg):</label>
+      <input type="number" id="targetTotalMassKg" min="0" step="any" value="64">
+    </div>
+  </div>
+
+  <button id="runButton" onclick="runPython()">Show Distributions</button>
+  <button id="mixButton" onclick="calculateMix()">Calculate Mix</button>
   <input type="file" id="appPyFile" accept=".py,text/x-python" style="display:none">
 
   <div class="progress-wrap" id="progressWrap">
@@ -167,6 +210,7 @@
 </div>
 
 <div id="output"></div>
+<div id="mixOutput"></div>
 <div class="plots">
   <div id="massPlot" class="plot-card"></div>
   <div id="dnPlot" class="plot-card"></div>
@@ -179,6 +223,10 @@
 let pyodide;
 let appSourceCache = null;
 let manualAddCounter = 0;
+let csvSourceCounter = 0;
+let massTargetCounter = 0;
+let dnTargetCounter = 0;
+const rhoS = 2.65;
 const pyodideReadyPromise = initPyodide();
 
 async function initPyodide() {
@@ -272,7 +320,358 @@ function renderResult(result) {
 
   out.classList.remove("error");
   out.textContent = text;
-  renderPlots(result);
+}
+
+function toSafeId(raw) {
+  return String(raw).replace(/[^a-zA-Z0-9_]+/g, "_");
+}
+
+function addCsvSourceRow(prefill = null) {
+  csvSourceCounter += 1;
+  const id = `csv_source_${csvSourceCounter}`;
+  const wrap = document.createElement("div");
+  wrap.className = "manual-item";
+  wrap.dataset.csvSourceId = id;
+
+  const d = prefill || {};
+  wrap.innerHTML = `
+    <div class="manual-grid">
+      <div><label>Label</label><input type="text" class="csv-label" value="${d.label || id}"></div>
+      <div><label>CSV File</label><input type="file" class="csv-file" accept=".csv,text/csv"></div>
+      <div><label>Total Mass (kg)</label><input type="number" class="csv-total" min="0" step="any" value="${d.total_mass_kg ?? 20}"></div>
+      <div><label>Shape Factor</label><input type="number" class="csv-shape" min="0" step="any" value="${d.shape_factor ?? 0.9}"></div>
+      <div><button type="button" class="csv-remove">Remove</button></div>
+    </div>
+  `;
+
+  const fileInput = wrap.querySelector(".csv-file");
+  const labelInput = wrap.querySelector(".csv-label");
+  fileInput.addEventListener("change", () => {
+    const f = fileInput.files && fileInput.files[0];
+    if (f && (!labelInput.value || labelInput.value === id)) {
+      labelInput.value = toSafeId(f.name.replace(/\.[^.]+$/, ""));
+    }
+  });
+
+  wrap.querySelector(".csv-remove").addEventListener("click", () => {
+    wrap.remove();
+  });
+
+  document.getElementById("csvSourcesList").appendChild(wrap);
+}
+
+async function collectDistributions() {
+  const rows = Array.from(document.querySelectorAll("#csvSourcesList .manual-item"));
+  const out = {};
+  let sourceIndex = 1;
+
+  for (let i = 0; i < rows.length; i += 1) {
+    const row = rows[i];
+    const file = row.querySelector(".csv-file").files[0];
+    if (!file) {
+      continue;
+    }
+
+    const rowNum = i + 1;
+    const labelRaw = row.querySelector(".csv-label").value.trim();
+    const totalMassKg = parseFloat(row.querySelector(".csv-total").value);
+    const shapeFactor = parseFloat(row.querySelector(".csv-shape").value);
+
+    if (!Number.isFinite(totalMassKg) || totalMassKg <= 0) {
+      throw new Error(`CSV row ${rowNum}: total mass must be > 0.`);
+    }
+    if (!Number.isFinite(shapeFactor) || shapeFactor <= 0) {
+      throw new Error(`CSV row ${rowNum}: shape factor must be > 0.`);
+    }
+
+    let label = toSafeId(labelRaw || file.name.replace(/\.[^.]+$/, "") || `dist_${sourceIndex}`);
+    if (!label) {
+      label = `dist_${sourceIndex}`;
+    }
+    let suffix = 2;
+    while (Object.prototype.hasOwnProperty.call(out, label)) {
+      label = `${label}_${suffix}`;
+      suffix += 1;
+    }
+
+    out[label] = {
+      csv_text: await file.text(),
+      total_mass_kg: totalMassKg,
+      shape_factor: shapeFactor
+    };
+    sourceIndex += 1;
+  }
+
+  return out;
+}
+
+function addMassTargetRow(prefill = null) {
+  massTargetCounter += 1;
+  const id = `mass_target_${massTargetCounter}`;
+  const wrap = document.createElement("div");
+  wrap.className = "manual-item";
+  wrap.dataset.massTargetId = id;
+  const d = prefill || {};
+
+  wrap.innerHTML = `
+    <div class="manual-grid">
+      <div><label>Label</label><input type="text" class="target-label" value="${d.label || id}"></div>
+      <div><label>Mass (g)</label><input type="number" class="target-mass" min="0" step="any" value="${d.mass_g ?? ""}"></div>
+      <div><label>% Passing</label><input type="number" class="target-pct" min="0" max="100" step="any" value="${d.pct_passing ?? ""}"></div>
+      <div><label>Shape Factor</label><input type="number" class="target-shape" min="0" step="any" value="${d.shape_factor ?? 0.9}"></div>
+      <div><button type="button" class="target-remove">Remove</button></div>
+    </div>
+  `;
+
+  wrap.querySelector(".target-remove").addEventListener("click", () => wrap.remove());
+  document.getElementById("massTargetsList").appendChild(wrap);
+}
+
+function addDnTargetRow(prefill = null) {
+  dnTargetCounter += 1;
+  const id = `dn_target_${dnTargetCounter}`;
+  const wrap = document.createElement("div");
+  wrap.className = "manual-item";
+  wrap.dataset.dnTargetId = id;
+  const d = prefill || {};
+
+  wrap.innerHTML = `
+    <div class="manual-grid">
+      <div><label>Label</label><input type="text" class="target-label" value="${d.label || id}"></div>
+      <div><label>Dn (mm)</label><input type="number" class="target-dn" min="0" step="any" value="${d.dn_mm ?? ""}"></div>
+      <div><label>% Passing</label><input type="number" class="target-pct" min="0" max="100" step="any" value="${d.pct_passing ?? ""}"></div>
+      <div><label>Shape Factor</label><input type="number" class="target-shape" min="0" step="any" value="${d.shape_factor ?? 0.9}"></div>
+      <div><button type="button" class="target-remove">Remove</button></div>
+    </div>
+  `;
+
+  wrap.querySelector(".target-remove").addEventListener("click", () => wrap.remove());
+  document.getElementById("dnTargetsList").appendChild(wrap);
+}
+
+function splitCsvLine(line) {
+  const out = [];
+  let cur = "";
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i += 1) {
+    const ch = line[i];
+    if (ch === "\"") {
+      if (inQuotes && i + 1 < line.length && line[i + 1] === "\"") {
+        cur += "\"";
+        i += 1;
+      } else {
+        inQuotes = !inQuotes;
+      }
+    } else if (ch === "," && !inQuotes) {
+      out.push(cur.trim());
+      cur = "";
+    } else {
+      cur += ch;
+    }
+  }
+  out.push(cur.trim());
+  return out;
+}
+
+function normalizeHeader(s) {
+  return String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+function parseTargetCsvText(csvText, kind) {
+  const lines = String(csvText)
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+
+  if (lines.length === 0) {
+    throw new Error("Target CSV is empty.");
+  }
+
+  const first = splitCsvLine(lines[0]);
+  const headerNorm = first.map(normalizeHeader);
+  const hasHeader = headerNorm.some((h) => h.includes("passing") || h.includes("label") || h.includes("shape"));
+
+  let startIdx = 0;
+  let idxLabel = 0;
+  let idxValue = 1;
+  let idxPct = 2;
+  let idxShape = 3;
+
+  if (hasHeader) {
+    startIdx = 1;
+    idxLabel = headerNorm.findIndex((h) => h.includes("label"));
+    idxPct = headerNorm.findIndex((h) => h.includes("passing"));
+    idxShape = headerNorm.findIndex((h) => h.includes("shape"));
+    if (kind === "mass") {
+      idxValue = headerNorm.findIndex((h) => h.includes("mass"));
+    } else {
+      idxValue = headerNorm.findIndex((h) => h.includes("dn"));
+    }
+    if (idxValue < 0 || idxPct < 0 || idxShape < 0) {
+      throw new Error(`Target CSV header must include ${kind === "mass" ? "Mass (g)" : "Dn (mm)"}, % Passing, and Shape Factor.`);
+    }
+    if (idxLabel < 0) {
+      idxLabel = -1;
+    }
+  }
+
+  const rows = [];
+  for (let i = startIdx; i < lines.length; i += 1) {
+    const cols = splitCsvLine(lines[i]);
+    if (cols.length === 0) {
+      continue;
+    }
+    const label = idxLabel >= 0 ? (cols[idxLabel] || "").trim() : "";
+    const v = parseFloat(cols[idxValue] || "");
+    const pct = parseFloat(cols[idxPct] || "");
+    const shape = parseFloat(cols[idxShape] || "");
+    if (!Number.isFinite(v) || !Number.isFinite(pct) || !Number.isFinite(shape)) {
+      continue;
+    }
+    rows.push({
+      label: label || `${kind}_target_csv_${rows.length + 1}`,
+      value: v,
+      pct_passing: pct,
+      shape_factor: shape
+    });
+  }
+
+  if (rows.length === 0) {
+    throw new Error("No valid target rows found in CSV.");
+  }
+  return rows;
+}
+
+async function importTargetCsv(kind) {
+  const picker = document.createElement("input");
+  picker.type = "file";
+  picker.accept = ".csv,text/csv";
+  picker.style.display = "none";
+  document.body.appendChild(picker);
+
+  picker.onchange = async () => {
+    try {
+      const file = picker.files && picker.files[0];
+      if (!file) {
+        return;
+      }
+      const text = await file.text();
+      const parsed = parseTargetCsvText(text, kind);
+      for (const r of parsed) {
+        if (kind === "mass") {
+          addMassTargetRow({
+            label: r.label,
+            mass_g: r.value,
+            pct_passing: r.pct_passing,
+            shape_factor: r.shape_factor
+          });
+        } else {
+          addDnTargetRow({
+            label: r.label,
+            dn_mm: r.value,
+            pct_passing: r.pct_passing,
+            shape_factor: r.shape_factor
+          });
+        }
+      }
+    } catch (err) {
+      const out = document.getElementById("output");
+      out.classList.add("error");
+      out.textContent = `Error: ${err.message || err}`;
+    } finally {
+      document.body.removeChild(picker);
+    }
+  };
+
+  picker.click();
+}
+
+function collectMassTargets() {
+  const rows = Array.from(document.querySelectorAll("#massTargetsList .manual-item"));
+  const targets = [];
+  for (let i = 0; i < rows.length; i += 1) {
+    const row = rows[i];
+    const label = row.querySelector(".target-label").value.trim() || `mass_target_${i + 1}`;
+    const mass = parseFloat(row.querySelector(".target-mass").value);
+    const pct = parseFloat(row.querySelector(".target-pct").value);
+    const shape = parseFloat(row.querySelector(".target-shape").value);
+
+    const allEmpty = !row.querySelector(".target-mass").value && !row.querySelector(".target-pct").value;
+    if (allEmpty) {
+      continue;
+    }
+    if (!Number.isFinite(mass) || mass <= 0) {
+      throw new Error(`Mass target row ${i + 1}: mass must be > 0.`);
+    }
+    if (!Number.isFinite(pct) || pct < 0 || pct > 100) {
+      throw new Error(`Mass target row ${i + 1}: % passing must be between 0 and 100.`);
+    }
+    if (!Number.isFinite(shape) || shape <= 0) {
+      throw new Error(`Mass target row ${i + 1}: shape factor must be > 0.`);
+    }
+    targets.push({ label, mass_g: mass, pct_passing: pct, shape_factor: shape });
+  }
+  return targets;
+}
+
+function collectDnTargets() {
+  const rows = Array.from(document.querySelectorAll("#dnTargetsList .manual-item"));
+  const targets = [];
+  for (let i = 0; i < rows.length; i += 1) {
+    const row = rows[i];
+    const label = row.querySelector(".target-label").value.trim() || `dn_target_${i + 1}`;
+    const dn = parseFloat(row.querySelector(".target-dn").value);
+    const pct = parseFloat(row.querySelector(".target-pct").value);
+    const shape = parseFloat(row.querySelector(".target-shape").value);
+
+    const allEmpty = !row.querySelector(".target-dn").value && !row.querySelector(".target-pct").value;
+    if (allEmpty) {
+      continue;
+    }
+    if (!Number.isFinite(dn) || dn <= 0) {
+      throw new Error(`Dn target row ${i + 1}: Dn must be > 0.`);
+    }
+    if (!Number.isFinite(pct) || pct < 0 || pct > 100) {
+      throw new Error(`Dn target row ${i + 1}: % passing must be between 0 and 100.`);
+    }
+    if (!Number.isFinite(shape) || shape <= 0) {
+      throw new Error(`Dn target row ${i + 1}: shape factor must be > 0.`);
+    }
+    targets.push({ label, dn_mm: dn, pct_passing: pct, shape_factor: shape });
+  }
+  return targets;
+}
+
+function massToDnMm(massG, shapeFactor) {
+  const v = massG / rhoS;
+  const dSphereCm = Math.pow((6 * v) / Math.PI, 1 / 3);
+  const dSphereMm = dSphereCm * 10.0;
+  return shapeFactor * dSphereMm;
+}
+
+function dnToMassG(dnMm, shapeFactor) {
+  const dSphereCm = (dnMm / shapeFactor) / 10.0;
+  const volCm3 = (Math.PI / 6.0) * Math.pow(dSphereCm, 3);
+  return rhoS * volCm3;
+}
+
+function buildDnTargetsForMix(massTargets, dnTargets) {
+  const merged = [];
+  for (const t of dnTargets || []) {
+    merged.push({
+      label: t.label,
+      dn_mm: t.dn_mm,
+      pct_passing: t.pct_passing
+    });
+  }
+  for (const t of massTargets || []) {
+    merged.push({
+      label: `${t.label}_from_mass`,
+      dn_mm: massToDnMm(t.mass_g, t.shape_factor),
+      pct_passing: t.pct_passing
+    });
+  }
+  return merged;
 }
 
 function addManualAddRow(prefill = null) {
@@ -362,7 +761,7 @@ function collectManualAdds() {
   return out;
 }
 
-function renderPlots(result) {
+function renderPlots(result, targets = { mass_targets: [], dn_targets: [] }) {
   if (typeof Plotly === "undefined") {
     return;
   }
@@ -396,6 +795,30 @@ function renderPlots(result) {
     })
   );
 
+  const massTargetTrace = {
+    x: (targets.mass_targets || []).map((t) => t.mass_g),
+    y: (targets.mass_targets || []).map((t) => t.pct_passing),
+    type: "scatter",
+    mode: "markers+text",
+    name: "Mass Targets",
+    marker: { color: "#d62728", size: 9, symbol: "circle" },
+    text: (targets.mass_targets || []).map((t) => t.label),
+    textposition: "top center",
+    textfont: { size: 10 }
+  };
+
+  const massFromDnTrace = {
+    x: (targets.dn_targets || []).map((t) => dnToMassG(t.dn_mm, t.shape_factor)),
+    y: (targets.dn_targets || []).map((t) => t.pct_passing),
+    type: "scatter",
+    mode: "markers+text",
+    name: "Dn Targets (as Mass)",
+    marker: { color: "#9467bd", size: 8, symbol: "diamond" },
+    text: (targets.dn_targets || []).map((t) => t.label),
+    textposition: "bottom center",
+    textfont: { size: 10 }
+  };
+
   Plotly.newPlot(
     "massPlot",
     [
@@ -407,7 +830,9 @@ function renderPlots(result) {
         mode: "lines",
         name: "Combined",
         line: { color: "#000000", width: 3 }
-      }
+      },
+      massTargetTrace,
+      massFromDnTrace
     ],
     {
       title: "Mass Distribution",
@@ -429,6 +854,30 @@ function renderPlots(result) {
     })
   );
 
+  const dnFromMassTrace = {
+    x: (targets.mass_targets || []).map((t) => massToDnMm(t.mass_g, t.shape_factor)),
+    y: (targets.mass_targets || []).map((t) => t.pct_passing),
+    type: "scatter",
+    mode: "markers+text",
+    name: "Mass Targets (as Dn)",
+    marker: { color: "#d62728", size: 9, symbol: "circle" },
+    text: (targets.mass_targets || []).map((t) => t.label),
+    textposition: "top center",
+    textfont: { size: 10 }
+  };
+
+  const dnTargetTrace = {
+    x: (targets.dn_targets || []).map((t) => t.dn_mm),
+    y: (targets.dn_targets || []).map((t) => t.pct_passing),
+    type: "scatter",
+    mode: "markers+text",
+    name: "Dn Targets",
+    marker: { color: "#9467bd", size: 8, symbol: "diamond" },
+    text: (targets.dn_targets || []).map((t) => t.label),
+    textposition: "bottom center",
+    textfont: { size: 10 }
+  };
+
   const dnTraces = [
     ...sourceDnTraces,
     {
@@ -438,7 +887,9 @@ function renderPlots(result) {
       mode: "lines",
       name: "Combined",
       line: { color: "#000000", width: 3 }
-    }
+    },
+    dnFromMassTrace,
+    dnTargetTrace
   ];
 
   if (result.final_mix_dn_curve) {
@@ -467,16 +918,15 @@ function renderPlots(result) {
 
 async function runPython() {
   const runButton = document.getElementById("runButton");
+  const mixButton = document.getElementById("mixButton");
   const out = document.getElementById("output");
 
   try {
     out.classList.remove("error");
     out.textContent = "";
 
-    const file1 = document.getElementById("file1").files[0];
-    const file2 = document.getElementById("file2").files[0];
-
     runButton.disabled = true;
+    mixButton.disabled = true;
 
     setProgress(10, "Waiting for Python to be ready...");
     await pyodideReadyPromise;
@@ -486,29 +936,10 @@ async function runPython() {
 
     setProgress(50, "Reading inputs...");
 
-    const mass1 = parseFloat(document.getElementById("mass1").value);
-    const mass2 = parseFloat(document.getElementById("mass2").value);
-    const shape1 = parseFloat(document.getElementById("shape1").value);
-    const shape2 = parseFloat(document.getElementById("shape2").value);
+    const distributions = await collectDistributions();
     const manualAdds = collectManualAdds();
-
-    const distributions = {};
-    if (file1) {
-      const text1 = await file1.text();
-      distributions.dist1 = {
-        csv_text: text1,
-        total_mass_kg: mass1,
-        shape_factor: shape1
-      };
-    }
-    if (file2) {
-      const text2 = await file2.text();
-      distributions.dist2 = {
-        csv_text: text2,
-        total_mass_kg: mass2,
-        shape_factor: shape2
-      };
-    }
+    const massTargets = collectMassTargets();
+    const dnTargets = collectDnTargets();
 
     if (Object.keys(distributions).length === 0 && Object.keys(manualAdds).length === 0) {
       throw new Error("Provide at least one CSV distribution or one manual Dn addition.");
@@ -536,7 +967,13 @@ result_json = json.dumps(result)
     const resultJson = pyodide.globals.get("result_json");
     const result = JSON.parse(resultJson);
 
+    const targets = {
+      mass_targets: massTargets,
+      dn_targets: dnTargets
+    };
+
     renderResult(result);
+    renderPlots(result, targets);
     setProgress(100, "Done");
     hideProgressSoon();
   } catch (err) {
@@ -549,8 +986,329 @@ result_json = json.dumps(result)
     setProgress(100, "Run failed");
   } finally {
     runButton.disabled = false;
+    mixButton.disabled = false;
   }
 }
+
+function renderMixResult(result) {
+  const out = document.getElementById("mixOutput");
+  const singleFits = result.single_source_fits || [];
+  const recs = result.recommendations || [];
+  const targetTotal = Number(result.target_total_mass_kg) || 0;
+  const currentTotal = recs.reduce((s, r) => s + (Number(r.current_mass_kg) || 0), 0);
+
+  let singleSourceHtml = "";
+  if (singleFits.length > 0) {
+    const rows = singleFits.map((s) =>
+      `<tr>
+        <td>${s.label}</td>
+        <td>${Number(s.current_mass_kg).toFixed(2)}</td>
+        <td>${Number(s.max_abs_diff_pct).toFixed(2)}</td>
+      </tr>`
+    ).join("");
+    singleSourceHtml = `
+      <div class="mix-meta"><strong>Single-source fits (can be used directly)</strong></div>
+      <table class="mix-table" style="margin-bottom:10px;">
+        <thead>
+          <tr>
+            <th>Source</th>
+            <th>Current Mass (kg)</th>
+            <th>Max Diff (%)</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    `;
+  } else {
+    singleSourceHtml = `<div class="mix-meta">No single source fully matches the target grading + mass.</div>`;
+  }
+
+  const recRows = recs.map((r) => {
+    let threshold = "";
+    if (r.threshold_dn_mm !== null && r.threshold_dn_mm !== undefined) {
+      threshold = `Dn ${Number(r.threshold_dn_mm).toFixed(2)} mm`;
+      if (r.threshold_mass_g !== null && r.threshold_mass_g !== undefined) {
+        threshold += ` (~${Number(r.threshold_mass_g).toFixed(2)} g)`;
+      }
+    }
+    const currentPctOfTarget = targetTotal > 0
+      ? (100 * Number(r.current_mass_kg) / targetTotal)
+      : 0;
+    return `
+      <tr>
+        <td>${r.source}</td>
+        <td>${Number(r.current_mass_kg).toFixed(2)}</td>
+        <td>${currentPctOfTarget.toFixed(2)}</td>
+        <td>${Number(r.recommended_percent).toFixed(2)}</td>
+        <td>${Number(r.recommended_mass_kg).toFixed(2)}</td>
+        <td>${Number(r.delta_kg_required_minus_current).toFixed(2)}</td>
+        <td>${r.guidance || ""}</td>
+        <td>${threshold}</td>
+      </tr>
+    `;
+  }).join("");
+
+  out.classList.remove("error");
+  out.innerHTML = `
+    <div class="mix-meta"><strong>Mix calculation completed</strong></div>
+    <div class="mix-meta">Fit MSE: ${Number(result.fit_mse).toPrecision(6)} | Current total: ${currentTotal.toFixed(2)} kg | Target total: ${targetTotal.toFixed(2)} kg</div>
+    ${singleSourceHtml}
+    <table class="mix-table">
+      <thead>
+        <tr>
+          <th>Source</th>
+          <th>Current Mass (kg)</th>
+          <th>Current (% of Target)</th>
+          <th>Required (% of Target)</th>
+          <th>Required Mass (kg)</th>
+          <th>Delta (Required-Current, kg)</th>
+          <th>Guidance</th>
+          <th>Trim Threshold</th>
+        </tr>
+      </thead>
+      <tbody>${recRows}</tbody>
+    </table>
+  `;
+}
+
+function renderMixPlots(mixResult, targets = { mass_targets: [], dn_targets: [] }) {
+  if (typeof Plotly === "undefined") {
+    return;
+  }
+
+  const sourcePalette = [
+    "rgba(31,119,180,0.45)",
+    "rgba(255,127,14,0.45)",
+    "rgba(44,160,44,0.45)",
+    "rgba(214,39,40,0.45)",
+    "rgba(148,103,189,0.45)",
+    "rgba(140,86,75,0.45)",
+    "rgba(227,119,194,0.45)",
+    "rgba(127,127,127,0.45)",
+    "rgba(188,189,34,0.45)",
+    "rgba(23,190,207,0.45)"
+  ];
+
+  const sourceMassTraces = Object.entries(mixResult.source_mass_curves || {}).map(
+    ([label, points], idx) => ({
+      x: points.map((p) => p.mass_g),
+      y: points.map((p) => p.pct_passing),
+      type: "scatter",
+      mode: "lines",
+      name: label,
+      line: { color: sourcePalette[idx % sourcePalette.length], width: 1.5 }
+    })
+  );
+
+  const sourceDnTraces = Object.entries(mixResult.source_dn_curves || {}).map(
+    ([label, points], idx) => ({
+      x: points.map((p) => p.Dn_mm),
+      y: points.map((p) => p.pct_passing),
+      type: "scatter",
+      mode: "lines",
+      name: label,
+      line: { color: sourcePalette[idx % sourcePalette.length], width: 1.5 }
+    })
+  );
+
+  const massTargetTrace = {
+    x: (targets.mass_targets || []).map((t) => t.mass_g),
+    y: (targets.mass_targets || []).map((t) => t.pct_passing),
+    type: "scatter",
+    mode: "markers+text",
+    name: "Mass Targets",
+    marker: { color: "#d62728", size: 9, symbol: "circle" },
+    text: (targets.mass_targets || []).map((t) => t.label),
+    textposition: "top center",
+    textfont: { size: 10 }
+  };
+
+  const massFromDnTrace = {
+    x: (targets.dn_targets || []).map((t) => dnToMassG(t.dn_mm, t.shape_factor)),
+    y: (targets.dn_targets || []).map((t) => t.pct_passing),
+    type: "scatter",
+    mode: "markers+text",
+    name: "Dn Targets (as Mass)",
+    marker: { color: "#9467bd", size: 8, symbol: "diamond" },
+    text: (targets.dn_targets || []).map((t) => t.label),
+    textposition: "bottom center",
+    textfont: { size: 10 }
+  };
+
+  const dnFromMassTrace = {
+    x: (targets.mass_targets || []).map((t) => massToDnMm(t.mass_g, t.shape_factor)),
+    y: (targets.mass_targets || []).map((t) => t.pct_passing),
+    type: "scatter",
+    mode: "markers+text",
+    name: "Mass Targets (as Dn)",
+    marker: { color: "#d62728", size: 9, symbol: "circle" },
+    text: (targets.mass_targets || []).map((t) => t.label),
+    textposition: "top center",
+    textfont: { size: 10 }
+  };
+
+  const dnTargetTrace = {
+    x: (targets.dn_targets || []).map((t) => t.dn_mm),
+    y: (targets.dn_targets || []).map((t) => t.pct_passing),
+    type: "scatter",
+    mode: "markers+text",
+    name: "Dn Targets",
+    marker: { color: "#9467bd", size: 8, symbol: "diamond" },
+    text: (targets.dn_targets || []).map((t) => t.label),
+    textposition: "bottom center",
+    textfont: { size: 10 }
+  };
+
+  const massTraces = [
+    ...sourceMassTraces,
+    {
+      x: (mixResult.current_mass_curve || []).map((p) => p.mass_g),
+      y: (mixResult.current_mass_curve || []).map((p) => p.pct_passing),
+      type: "scatter",
+      mode: "lines",
+      name: "Current Combined",
+      line: { color: "rgba(0,0,0,0.55)", width: 2.2, dash: "dot" }
+    },
+    {
+      x: (mixResult.final_mass_curve || []).map((p) => p.mass_g),
+      y: (mixResult.final_mass_curve || []).map((p) => p.pct_passing),
+      type: "scatter",
+      mode: "lines",
+      name: "Recommended Mix",
+      line: { color: "#000000", width: 3.6 }
+    },
+    massTargetTrace,
+    massFromDnTrace
+  ];
+
+  const dnTraces = [
+    ...sourceDnTraces,
+    {
+      x: (mixResult.current_dn_curve || []).map((p) => p.Dn_mm),
+      y: (mixResult.current_dn_curve || []).map((p) => p.pct_passing),
+      type: "scatter",
+      mode: "lines",
+      name: "Current Combined",
+      line: { color: "rgba(0,0,0,0.55)", width: 2.2, dash: "dot" }
+    },
+    {
+      x: (mixResult.final_dn_curve || []).map((p) => p.Dn_mm),
+      y: (mixResult.final_dn_curve || []).map((p) => p.pct_passing),
+      type: "scatter",
+      mode: "lines",
+      name: "Recommended Mix",
+      line: { color: "#000000", width: 3.6 }
+    },
+    dnFromMassTrace,
+    dnTargetTrace
+  ];
+
+  Plotly.newPlot(
+    "massPlot",
+    massTraces,
+    {
+      title: "Mass Distribution (Mix Recommendation)",
+      xaxis: { title: "Mass (g)" },
+      yaxis: { title: "Percentage Passing (%)", range: [0, 100] },
+      margin: { l: 55, r: 20, t: 45, b: 50 }
+    },
+    { responsive: true, displaylogo: false }
+  );
+
+  Plotly.newPlot(
+    "dnPlot",
+    dnTraces,
+    {
+      title: "Nominal Diameter Distribution (Mix Recommendation)",
+      xaxis: { title: "Equivalent Nominal Diameter Dn (mm)" },
+      yaxis: { title: "Percentage Passing (%)", range: [0, 100] },
+      margin: { l: 55, r: 20, t: 45, b: 50 }
+    },
+    { responsive: true, displaylogo: false }
+  );
+}
+
+async function calculateMix() {
+  const runButton = document.getElementById("runButton");
+  const mixButton = document.getElementById("mixButton");
+  const mixOut = document.getElementById("mixOutput");
+
+  try {
+    mixOut.classList.remove("error");
+    mixOut.textContent = "";
+
+    runButton.disabled = true;
+    mixButton.disabled = true;
+
+    setProgress(10, "Waiting for Python to be ready...");
+    await pyodideReadyPromise;
+
+    setProgress(35, "Loading model code...");
+    await ensureAppModuleLoaded();
+
+    setProgress(50, "Reading inputs...");
+    const distributions = await collectDistributions();
+    const manualAdds = collectManualAdds();
+    const massTargets = collectMassTargets();
+    const dnTargets = collectDnTargets();
+
+    if (Object.keys(distributions).length === 0 && Object.keys(manualAdds).length === 0) {
+      throw new Error("Calculate Mix needs at least one rock source.");
+    }
+    if (massTargets.length === 0 && dnTargets.length === 0) {
+      throw new Error("Calculate Mix needs at least one target value.");
+    }
+
+    const targetTotalMassKg = parseFloat(document.getElementById("targetTotalMassKg").value);
+    if (!Number.isFinite(targetTotalMassKg) || targetTotalMassKg <= 0) {
+      throw new Error("Target Total Mass (kg) must be > 0.");
+    }
+
+    const targetDnPoints = buildDnTargetsForMix(massTargets, dnTargets);
+    const mixConfig = {
+      distributions,
+      manual_adds: manualAdds,
+      target_spec: {
+        target_total_mass_kg: targetTotalMassKg,
+        dn_targets: targetDnPoints,
+        min_source_fraction: 0.0,
+        diversity_penalty: 0.01,
+        max_iter: 3000,
+        learning_rate: 0.2,
+        single_source_tol_pct: 3.0
+      }
+    };
+
+    setProgress(70, "Calculating recommended mix...");
+    pyodide.globals.set("mix_config_js", mixConfig);
+
+    await pyodide.runPythonAsync(`
+import json
+from app import calculate_mix
+
+mix_config = mix_config_js.to_py()
+mix_result = calculate_mix(mix_config)
+mix_result_json = json.dumps(mix_result)
+    `);
+
+    setProgress(90, "Formatting mix result...");
+    const mixResultJson = pyodide.globals.get("mix_result_json");
+    const mixResult = JSON.parse(mixResultJson);
+    renderMixResult(mixResult);
+    renderMixPlots(mixResult, { mass_targets: massTargets, dn_targets: dnTargets });
+
+    setProgress(100, "Done");
+    hideProgressSoon();
+  } catch (err) {
+    mixOut.classList.add("error");
+    mixOut.textContent = `Error: ${err.message || err}`;
+    setProgress(100, "Run failed");
+  } finally {
+    runButton.disabled = false;
+    mixButton.disabled = false;
+  }
+}
+
 </script>
 
 </body>
